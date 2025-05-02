@@ -14,8 +14,9 @@ import (
 
 // Client struct represents a single connected user
 type Client struct {
-	username string
-	conn     net.Conn
+	username   string
+	conn       net.Conn
+	isConnected bool
 }
 
 // Message struct represents a chat message
@@ -54,6 +55,12 @@ func main() {
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 		log.Println("Shutting down server...")
+
+		// Close channels
+		close(clientJoinChan)
+		close(clientLeaveChan)
+		close(broadcastChan)
+
 		listener.Close() // This causes Accept() to fail, exiting the loop
 	}()
 
@@ -97,7 +104,7 @@ func handleConnection(conn net.Conn) {
 	}
 	username = username[:len(username)-1] // Remove newline character
 
-	client := &Client{username: username, conn: conn}
+	client := &Client{username: username, conn: conn, isConnected: true}
 
 	// Notify server of new client
 	clientJoinChan <- client
