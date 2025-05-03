@@ -2,72 +2,87 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
-	"sync"
+	"strings"
 	"syscall"
+	"time"
 )
 
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Connect to server
 	conn, err := net.Dial("tcp", "localhost:4000")
 	if err != nil {
-		fmt.Printf("Failed to connect to server: %v\n", err)
+		fmt.Printf("Connection failed: %v\n", err)
 		return
 	}
 	defer conn.Close()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	doneChan := make(chan bool)
+	// Buffered channel for messages
+	msgChan := make(chan string, 10) // Buffer to prevent blocking
+	errChan := make(chan error, 1)
 
+	// Start reader goroutine
 	go func() {
-		<-sigChan
-		fmt.Println("\nDisconnecting from server...")
-		conn.Write([]byte("/quit\n"))
-		doneChan <- true
-	}()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// Handle incoming messages from the server
-	go func() {
-		defer wg.Done()
 		reader := bufio.NewReader(conn)
 		for {
-			message, err := reader.ReadString('\n')
+			msg, err := reader.ReadString('\n')
 			if err != nil {
-				fmt.Printf("Disconnected from server: %v\n", err)
-				doneChan <- true
+				errChan <- fmt.Errorf("connection error: %v", err)
 				return
 			}
-			fmt.Print(message)
+			msgChan <- strings.TrimSpace(msg)
 		}
 	}()
 
-	// Send messages to the server
+	// Start writer goroutine
 	go func() {
-		defer wg.Done()
 		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
-			text := scanner.Text()
-			_, err := fmt.Fprintf(conn, text+"\n")
-			if err != nil {
-				fmt.Printf("Error sending message: %v\n", err)
-				doneChan <- true
-				break
+			text := strings.TrimSpace(scanner.Text())
+			if text == "" {
+				continue
+			}
+
+			if _, err := fmt.Fprintln(conn, text); err != nil {
+				errChan <- err
+				return
 			}
 
 			if text == "/quit" {
-				doneChan <- true
+				cancel()
 				return
 			}
 		}
 	}()
 
-	// Wait for graceful exit
-	<-doneChan
-	wg.Wait()
+	// Signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Main loop
+	for {
+		select {
+		case msg := <-msgChan:
+			fmt.Println(msg) // Print all incoming messages
+
+		case err := <-errChan:
+			fmt.Printf("Error: %v\n", err)
+			return
+
+		case <-sigChan:
+			fmt.Fprintln(conn, "/quit")
+			time.Sleep(100 * time.Millisecond)
+			return
+
+		case <-ctx.Done():
+			return
+		}
+	}
 }
