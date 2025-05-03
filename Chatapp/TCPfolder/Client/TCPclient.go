@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -13,35 +14,43 @@ import (
 )
 
 func main() {
+	// Configure command-line flags
+	serverHost := flag.String("host", "localhost", "Server host address")
+	serverPort := flag.String("port", "4000", "Server port number")
+	flag.Parse()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Connect to server
-	conn, err := net.Dial("tcp", "localhost:4000")
+	// Connect to server using configured host:port
+	serverAddr := net.JoinHostPort(*serverHost, *serverPort)
+	conn, err := net.Dial("tcp", serverAddr)
 	if err != nil {
-		fmt.Printf("Connection failed: %v\n", err)
+		fmt.Printf("Connection failed to %s: %v\n", serverAddr, err)
 		return
 	}
 	defer conn.Close()
 
-	// Buffered channel for messages
-	msgChan := make(chan string, 10) // Buffer to prevent blocking
+	fmt.Printf("Connected to server at %s. Type /quit to exit.\n", serverAddr)
+
+	// Buffered channels
+	msgChan := make(chan string, 10)
 	errChan := make(chan error, 1)
 
-	// Start reader goroutine
+	// Reader goroutine
 	go func() {
 		reader := bufio.NewReader(conn)
 		for {
 			msg, err := reader.ReadString('\n')
 			if err != nil {
-				errChan <- fmt.Errorf("connection error: %v", err)
+				errChan <- fmt.Errorf("server disconnected: %v", err)
 				return
 			}
 			msgChan <- strings.TrimSpace(msg)
 		}
 	}()
 
-	// Start writer goroutine
+	// Writer goroutine
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
@@ -50,13 +59,14 @@ func main() {
 				continue
 			}
 
-			if _, err := fmt.Fprintln(conn, text); err != nil {
-				errChan <- err
+			if text == "/quit" {
+				fmt.Fprintln(conn, text)
+				cancel()
 				return
 			}
 
-			if text == "/quit" {
-				cancel()
+			if _, err := fmt.Fprintln(conn, text); err != nil {
+				errChan <- err
 				return
 			}
 		}
@@ -70,7 +80,11 @@ func main() {
 	for {
 		select {
 		case msg := <-msgChan:
-			fmt.Println(msg) // Print all incoming messages
+			if msg == "PING" {
+				fmt.Fprintln(conn, "PONG") // Respond to keepalive
+				continue
+			}
+			fmt.Println(msg)
 
 		case err := <-errChan:
 			fmt.Printf("Error: %v\n", err)

@@ -24,9 +24,9 @@ type Client struct {
 }
 
 type Message struct {
-	text    string
-	sender  *Client
-	sentAt  time.Time
+	text   string
+	sender *Client
+	sentAt time.Time
 }
 
 var (
@@ -185,9 +185,9 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 			}
 
 			broadcastChan <- Message{
-				text:    msgText,
-				sender:  client,
-				sentAt:  time.Now(),
+				text:   msgText,
+				sender: client,
+				sentAt: time.Now(),
 			}
 		}
 	}
