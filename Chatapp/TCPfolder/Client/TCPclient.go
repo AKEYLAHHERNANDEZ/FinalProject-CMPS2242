@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -14,7 +15,6 @@ import (
 )
 
 func main() {
-	// Configure command-line flags
 	serverHost := flag.String("host", "localhost", "Server host address")
 	serverPort := flag.String("port", "4000", "Server port number")
 	flag.Parse()
@@ -22,37 +22,63 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Connect to server using configured host:port
+	// Connect with timeout settings
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 1 * time.Minute,
+	}
 	serverAddr := net.JoinHostPort(*serverHost, *serverPort)
-	conn, err := net.Dial("tcp", serverAddr)
+	conn, err := dialer.Dial("tcp", serverAddr)
 	if err != nil {
-		fmt.Printf("Connection failed to %s: %v\n", serverAddr, err)
-		return
+		log.Fatalf("Connection failed to %s: %v\n", serverAddr, err)
 	}
 	defer conn.Close()
 
-	fmt.Printf("Connected to server at %s. Type /quit to exit.\n", serverAddr)
+	// Enable TCP keepalive
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetKeepAlive(true)
+	}
 
-	// Buffered channels
+	log.Printf("Connected to server at %s (Type /quit to exit).\n", serverAddr)
+
+	// Handle username exchange first
+	reader := bufio.NewReader(conn)
+	prompt, err := reader.ReadString(':')
+	if err != nil {
+		log.Fatalf("Failed to read username prompt: %v", err)
+	}
+	fmt.Print(strings.TrimSpace(prompt) + " ")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	username := strings.TrimSpace(scanner.Text())
+	fmt.Fprintln(conn, username)
+
+	// Setup communication channels
 	msgChan := make(chan string, 10)
 	errChan := make(chan error, 1)
 
-	// Reader goroutine
+	// Message receiver
 	go func() {
-		reader := bufio.NewReader(conn)
 		for {
 			msg, err := reader.ReadString('\n')
 			if err != nil {
 				errChan <- fmt.Errorf("server disconnected: %v", err)
 				return
 			}
-			msgChan <- strings.TrimSpace(msg)
+			msg = strings.TrimSpace(msg)
+			
+			if msg == "__PING__" {
+				fmt.Fprintln(conn, "__PONG__")
+				continue
+			}
+			
+			msgChan <- msg
 		}
 	}()
 
-	// Writer goroutine
+	// Message sender
 	go func() {
-		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
 			text := strings.TrimSpace(scanner.Text())
 			if text == "" {
@@ -76,25 +102,16 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Main loop
 	for {
 		select {
 		case msg := <-msgChan:
-			if msg == "PING" {
-				fmt.Fprintln(conn, "PONG") // Respond to keepalive
-				continue
-			}
 			fmt.Println(msg)
-
 		case err := <-errChan:
 			fmt.Printf("Error: %v\n", err)
 			return
-
 		case <-sigChan:
 			fmt.Fprintln(conn, "/quit")
-			time.Sleep(100 * time.Millisecond)
 			return
-
 		case <-ctx.Done():
 			return
 		}
