@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -45,6 +46,15 @@ func main() {
 	port := flag.String("port", "4000", "Server port number")
 	flag.Parse()
 
+	// --- Log file setup ---
+	logFile, err := os.OpenFile("chat.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open log file: %v", err)
+	}
+	defer logFile.Close()
+	log.SetOutput(io.MultiWriter(os.Stdout, logFile))
+	// ----------------------
+
 	addr := net.JoinHostPort(*host, *port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -56,7 +66,6 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Graceful shutdown
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -87,28 +96,26 @@ func main() {
 }
 
 func handleConnection(ctx context.Context, conn net.Conn) {
-		defer conn.Close()
-	
-		// Immediately request username
-		conn.SetDeadline(time.Now().Add(50 * time.Second))
-		_, err := conn.Write([]byte("Enter username: "))
-		if err != nil {
-			log.Printf("Username prompt error: %v", err)
-			return
-		}
-	
-		// Read username first before anything else
-		username, err := bufio.NewReader(conn).ReadString('\n')
-		if err != nil {
-			log.Printf("Username read error: %v", err)
-			return
-		}
-		username = strings.TrimSpace(username)
-	
-		if isUsernameTaken(username) {
-			conn.Write([]byte("Username taken. Disconnecting.\n"))
-			return
-		}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(50 * time.Second))
+	_, err := conn.Write([]byte("Enter username: "))
+	if err != nil {
+		log.Printf("Username prompt error: %v", err)
+		return
+	}
+
+	username, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		log.Printf("Username read error: %v", err)
+		return
+	}
+	username = strings.TrimSpace(username)
+
+	if isUsernameTaken(username) {
+		conn.Write([]byte("Username taken. Disconnecting.\n"))
+		return
+	}
 
 	client := &Client{
 		username:    username,
@@ -156,7 +163,6 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		}
 	}()
 
-	// Increase buffer for long messages
 	scanner := bufio.NewScanner(conn)
 	buf := make([]byte, 0, 2048)
 	scanner.Buffer(buf, 4096)
@@ -169,7 +175,6 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 			continue
 		}
 
-		// Command handling
 		if strings.HasPrefix(msgText, "/") {
 			args := strings.Fields(msgText)
 			command := args[0]
