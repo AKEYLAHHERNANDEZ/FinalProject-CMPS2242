@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"os"
 	"os/signal"
@@ -68,12 +67,10 @@ func main() {
 		listener.Close()
 	}()
 
-	// Start services
 	go broadcastMessages(ctx)
 	go manageClients(ctx)
 	go monitorConnections(ctx)
 
-	// Accept connections
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -89,53 +86,30 @@ func main() {
 	}
 }
 
-// clientWriter handles writing messages to a single client
-func clientWriter(ctx context.Context, client *Client) {
-	ticker := time.NewTicker(pingInterval)
-	defer ticker.Stop()
-	defer close(client.messageChan)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case msg, ok := <-client.messageChan:
-			if !ok {
-				return // Channel closed
-			}
-			if _, err := client.conn.Write([]byte(msg + "\n")); err != nil {
-				clientLeaveChan <- client
-				return
-			}
-		case <-ticker.C:
-			if _, err := client.conn.Write([]byte("PING\n")); err != nil {
-				clientLeaveChan <- client
-				return
-			}
-		}
-	}
-}
-
 func handleConnection(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+		defer conn.Close()
+	
+		// Immediately request username
+		conn.SetDeadline(time.Now().Add(50 * time.Second))
+		_, err := conn.Write([]byte("Enter username: "))
+		if err != nil {
+			log.Printf("Username prompt error: %v", err)
+			return
+		}
+	
+		// Read username first before anything else
+		username, err := bufio.NewReader(conn).ReadString('\n')
+		if err != nil {
+			log.Printf("Username read error: %v", err)
+			return
+		}
+		username = strings.TrimSpace(username)
+	
+		if isUsernameTaken(username) {
+			conn.Write([]byte("Username taken. Disconnecting.\n"))
+			return
+		}
 
-	// Get username
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
-	conn.Write([]byte("Enter username (3-20 alphanumeric chars): "))
-
-	username, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil {
-		log.Printf("Username read error: %v", err)
-		return
-	}
-	username = strings.TrimSpace(username)
-
-	if !isValidUsername(username) || isUsernameTaken(username) {
-		conn.Write([]byte("Invalid or taken username. Disconnecting.\n"))
-		return
-	}
-
-	// Create client
 	client := &Client{
 		username:    username,
 		conn:        conn,
@@ -143,61 +117,96 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 		messageChan: make(chan string, 10),
 	}
 
-	// Register client
+	log.Printf("Client joined: %s", username)
+
 	select {
 	case clientJoinChan <- client:
 	case <-ctx.Done():
 		return
 	}
 
-	// Notify chat
 	broadcastChan <- Message{
 		text:   fmt.Sprintf("%s joined", username),
 		sender: nil,
 		sentAt: time.Now(),
 	}
 
-	// Start writer
-	go clientWriter(ctx, client)
+	go func() {
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-client.messageChan:
+				if !ok {
+					return
+				}
+				_, err := conn.Write([]byte(msg + "\n"))
+				if err != nil {
+					clientLeaveChan <- client
+					return
+				}
+			case <-ticker.C:
+				if _, err := conn.Write([]byte("PING\n")); err != nil {
+					clientLeaveChan <- client
+					return
+				}
+			}
+		}
+	}()
 
-	// Read messages
+	// Increase buffer for long messages
 	scanner := bufio.NewScanner(conn)
+	buf := make([]byte, 0, 2048)
+	scanner.Buffer(buf, 4096)
+
 	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			msgText := strings.TrimSpace(scanner.Text())
-			client.lastActive = time.Now()
+		msgText := strings.TrimSpace(scanner.Text())
+		client.lastActive = time.Now()
 
-			if msgText == "" {
-				continue
-			}
+		if msgText == "" {
+			continue
+		}
 
-			if msgText == "/quit" {
+		// Command handling
+		if strings.HasPrefix(msgText, "/") {
+			args := strings.Fields(msgText)
+			command := args[0]
+
+			switch command {
+			case "/quit":
 				client.messageChan <- "Goodbye!"
-				break
+				clientLeaveChan <- client
+				return
+			case "/users":
+				client.messageChan <- listUsernames()
+			default:
+				client.messageChan <- "Unknown command."
 			}
+			continue
+		}
 
-			if len(msgText) > maxMessageLength {
-				client.messageChan <- fmt.Sprintf("Message exceeds %d chars", maxMessageLength)
-				continue
-			}
+		if len(msgText) > maxMessageLength {
+			client.messageChan <- fmt.Sprintf("Message exceeds %d characters", maxMessageLength)
+			continue
+		}
 
-			broadcastChan <- Message{
-				text:   msgText,
-				sender: client,
-				sentAt: time.Now(),
-			}
+		broadcastChan <- Message{
+			text:   msgText,
+			sender: client,
+			sentAt: time.Now(),
 		}
 	}
 
-	// Cleanup
 	broadcastChan <- Message{
 		text:   fmt.Sprintf("%s left", username),
 		sender: nil,
 		sentAt: time.Now(),
 	}
+
+	clientLeaveChan <- client
+	log.Printf("Client left: %s", username)
 }
 
 func broadcastMessages(ctx context.Context) {
@@ -208,38 +217,16 @@ func broadcastMessages(ctx context.Context) {
 		case msg := <-broadcastChan:
 			clientsMux.Lock()
 			totalMessages++
-			recipients := make([]*Client, 0, len(clients))
 			for c := range clients {
 				if c != msg.sender {
-					recipients = append(recipients, c)
+					select {
+					case c.messageChan <- formatMessage(msg):
+					default:
+						clientLeaveChan <- c
+					}
 				}
 			}
 			clientsMux.Unlock()
-
-			// Format message
-			var prefix string
-			if msg.sender != nil {
-				prefix = fmt.Sprintf("[%s]: ", msg.sender.username)
-			} else {
-				prefix = "[System]: "
-			}
-
-			// Deliver with simulated network delay (0-200ms)
-			delay := time.Duration(rand.Intn(200)) * time.Millisecond
-			time.Sleep(delay)
-
-			// Simulate 10% packet loss
-			if rand.Float32() < 0.1 {
-				continue
-			}
-
-			for _, c := range recipients {
-				select {
-				case c.messageChan <- prefix + msg.text:
-				default:
-					clientLeaveChan <- c
-				}
-			}
 		}
 	}
 }
@@ -253,14 +240,13 @@ func manageClients(ctx context.Context) {
 			clientsMux.Lock()
 			clients[client] = true
 			clientsMux.Unlock()
-			client.messageChan <- fmt.Sprintf("Welcome %s! Type /quit to exit.", client.username)
-
+			client.messageChan <- fmt.Sprintf("Welcome %s!", client.username)
 		case client := <-clientLeaveChan:
 			clientsMux.Lock()
 			if _, ok := clients[client]; ok {
 				client.conn.Close()
 				delete(clients, client)
-				log.Printf("%s disconnected", client.username)
+				close(client.messageChan)
 			}
 			clientsMux.Unlock()
 		}
@@ -268,7 +254,7 @@ func manageClients(ctx context.Context) {
 }
 
 func monitorConnections(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
 
 	for {
@@ -289,16 +275,11 @@ func monitorConnections(ctx context.Context) {
 	}
 }
 
-func isValidUsername(username string) bool {
-	if len(username) < 3 || len(username) > 20 {
-		return false
+func formatMessage(msg Message) string {
+	if msg.sender != nil {
+		return fmt.Sprintf("[%s]: %s", msg.sender.username, msg.text)
 	}
-	for _, c := range username {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
-			return false
-		}
-	}
-	return true
+	return "[System]: " + msg.text
 }
 
 func isUsernameTaken(username string) bool {
@@ -310,4 +291,14 @@ func isUsernameTaken(username string) bool {
 		}
 	}
 	return false
+}
+
+func listUsernames() string {
+	clientsMux.Lock()
+	defer clientsMux.Unlock()
+	var usernames []string
+	for client := range clients {
+		usernames = append(usernames, client.username)
+	}
+	return "Online: " + strings.Join(usernames, ", ")
 }
