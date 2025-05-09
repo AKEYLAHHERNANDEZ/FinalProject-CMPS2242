@@ -36,7 +36,8 @@ func startClient() error {
 	go sendHeartbeat(conn)
 
 	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Println("Enter messages to send (type /quit to exit):")
+	fmt.Println("Commands: (/quit to exit) or (/msg <username><message> for private message)")
+	fmt.Println("Enter messages to send:")
 
 	for scanner.Scan() {
 		text := strings.TrimSpace(scanner.Text())

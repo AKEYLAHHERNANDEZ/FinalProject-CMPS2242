@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-	conn, err := net.Dial("tcp", "localhost:4000") // Change if needed
+	conn, err := net.Dial("tcp", "localhost:4000") 
 	if err != nil {
 		fmt.Println("Connection error:", err)
 		return
