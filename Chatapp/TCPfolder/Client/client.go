@@ -1,3 +1,5 @@
+//Filename: client.go
+//Akeylah
 package main
 
 import (
@@ -48,7 +50,7 @@ func main() {
 	writer.WriteString(usernameInput + "\n")
 	writer.Flush()
 
-	// --- Goroutine to listen for server messages and print them ---
+	// Goroutine to listen for server messages and print them 
 	go func() {
 		for {
 			msg, err := reader.ReadString('\n') // Read message from server
