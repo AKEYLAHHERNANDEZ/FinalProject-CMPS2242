@@ -169,7 +169,7 @@ func handleConnection(ctx context.Context, conn net.Conn) {
 	buf := make([]byte, 0, 4096)
 	scanner.Buffer(buf, 4096)
 
-	inactivityTimeout := 20 * time.Second
+	inactivityTimeout := 1 * time.Minute
 	for {
 		conn.SetReadDeadline(time.Now().Add(inactivityTimeout))
 		if !scanner.Scan() {
